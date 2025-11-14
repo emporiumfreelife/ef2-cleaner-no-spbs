@@ -58,23 +58,52 @@ export default function Media() {
   useEffect(() => {
     if (!user) return;
 
-    const likesSubscription = supabase
-      .channel('media_likes_changes')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'media_likes' }, () => {
-        fetchMediaContent();
-      })
-      .subscribe();
+    let isMounted = true;
+    let retryCount = 0;
+    const maxRetries = 3;
 
-    const followsSubscription = supabase
-      .channel('creator_follows_changes')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'creator_follows' }, () => {
-        fetchMediaContent();
-      })
-      .subscribe();
+    const setupSubscriptions = async () => {
+      try {
+        const likesSubscription = supabase
+          .channel('media_likes_changes')
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'media_likes' }, () => {
+            if (isMounted) fetchMediaContent();
+          })
+          .subscribe((status) => {
+            if (status === 'CHANNEL_ERROR' && retryCount < maxRetries) {
+              retryCount++;
+              setTimeout(setupSubscriptions, 2000 * retryCount);
+            }
+          });
+
+        const followsSubscription = supabase
+          .channel('creator_follows_changes')
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'creator_follows' }, () => {
+            if (isMounted) fetchMediaContent();
+          })
+          .subscribe((status) => {
+            if (status === 'CHANNEL_ERROR' && retryCount < maxRetries) {
+              retryCount++;
+              setTimeout(setupSubscriptions, 2000 * retryCount);
+            }
+          });
+
+        return () => {
+          if (isMounted) {
+            likesSubscription.unsubscribe();
+            followsSubscription.unsubscribe();
+          }
+        };
+      } catch (error) {
+        console.error('Error setting up subscriptions:', error);
+      }
+    };
+
+    const unsubscribe = setupSubscriptions();
 
     return () => {
-      likesSubscription.unsubscribe();
-      followsSubscription.unsubscribe();
+      isMounted = false;
+      unsubscribe?.then((unsub) => unsub?.());
     };
   }, [user, activeTab]);
 
@@ -89,50 +118,68 @@ export default function Media() {
 
       if (error) throw error;
 
-      if (mediaData) {
-        const enrichedData = await Promise.all(
-          mediaData.map(async (item) => {
-            const { count: likesCount } = await supabase
-              .from('media_likes')
-              .select('*', { count: 'exact', head: true })
-              .eq('media_id', item.id);
+      if (!mediaData) {
+        setMediaContent([]);
+        return;
+      }
 
-            let isLiked = false;
-            let isFollowing = false;
+      if (!user) {
+        const simpleData = mediaData.map((item) => ({
+          ...item,
+          likes_count: 0,
+          is_liked: false,
+          is_following: false,
+        }));
+        setMediaContent(simpleData);
+        return;
+      }
 
-            if (user) {
-              const { data: likeData } = await supabase
+      const enrichedData = await Promise.all(
+        mediaData.map(async (item) => {
+          try {
+            const [likesResult, userLikeResult, userFollowResult] = await Promise.all([
+              supabase
+                .from('media_likes')
+                .select('*', { count: 'exact', head: true })
+                .eq('media_id', item.id),
+              supabase
                 .from('media_likes')
                 .select('id')
                 .eq('media_id', item.id)
                 .eq('user_id', user.id)
-                .maybeSingle();
-
-              isLiked = !!likeData;
-
-              const { data: followData } = await supabase
+                .maybeSingle(),
+              supabase
                 .from('creator_follows')
                 .select('id')
                 .eq('creator_name', item.creator_name)
                 .eq('follower_id', user.id)
-                .maybeSingle();
-
-              isFollowing = !!followData;
-            }
+                .maybeSingle(),
+            ]);
 
             return {
               ...item,
-              likes_count: likesCount || 0,
-              is_liked: isLiked,
-              is_following: isFollowing,
+              likes_count: likesResult.count || 0,
+              is_liked: !!userLikeResult.data,
+              is_following: !!userFollowResult.data,
             };
-          })
-        );
+          } catch (itemError) {
+            console.error('Error enriching media item:', itemError);
+            return {
+              ...item,
+              likes_count: 0,
+              is_liked: false,
+              is_following: false,
+            };
+          }
+        })
+      );
 
-        setMediaContent(enrichedData);
-      }
-    } catch (error) {
+      setMediaContent(enrichedData);
+    } catch (error: any) {
       console.error('Error fetching media:', error);
+      if (error?.message?.includes('401') || error?.message?.includes('Unauthorized')) {
+        setUser(null);
+      }
     } finally {
       setLoading(false);
     }
@@ -156,7 +203,14 @@ export default function Media() {
           .eq('media_id', mediaId)
           .eq('user_id', user.id);
 
-        if (error) throw error;
+        if (error) {
+          if (error.message.includes('401') || error.message.includes('Unauthorized')) {
+            alert('Your session has expired. Please sign in again.');
+            navigate('/signin');
+            return;
+          }
+          throw error;
+        }
 
         setMediaContent((prev) =>
           prev.map((m) =>
@@ -170,7 +224,14 @@ export default function Media() {
           .from('media_likes')
           .insert({ media_id: mediaId, user_id: user.id });
 
-        if (error) throw error;
+        if (error) {
+          if (error.message.includes('401') || error.message.includes('Unauthorized')) {
+            alert('Your session has expired. Please sign in again.');
+            navigate('/signin');
+            return;
+          }
+          throw error;
+        }
 
         setMediaContent((prev) =>
           prev.map((m) =>
@@ -204,7 +265,14 @@ export default function Media() {
           .eq('creator_name', creatorName)
           .eq('follower_id', user.id);
 
-        if (error) throw error;
+        if (error) {
+          if (error.message.includes('401') || error.message.includes('Unauthorized')) {
+            alert('Your session has expired. Please sign in again.');
+            navigate('/signin');
+            return;
+          }
+          throw error;
+        }
 
         setMediaContent((prev) =>
           prev.map((m) =>
@@ -216,7 +284,14 @@ export default function Media() {
           .from('creator_follows')
           .insert({ creator_name: creatorName, follower_id: user.id });
 
-        if (error) throw error;
+        if (error) {
+          if (error.message.includes('401') || error.message.includes('Unauthorized')) {
+            alert('Your session has expired. Please sign in again.');
+            navigate('/signin');
+            return;
+          }
+          throw error;
+        }
 
         setMediaContent((prev) =>
           prev.map((m) =>

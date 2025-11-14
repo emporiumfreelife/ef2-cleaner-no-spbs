@@ -69,33 +69,42 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
 
   useEffect(() => {
-    // Listen for auth state changes (login, logout, token refresh)
-    const { data: authListener } = supabase.auth.onAuthStateChange(
-      async (event, session) => {
-        if (session?.user) {
+    let isMounted = true;
+
+    const setupAuth = async () => {
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (isMounted && session?.user) {
           const appUser = await getProfile(session.user.id, session.user.email!);
-          setUser(appUser);
-        } else {
-          setUser(null);
+          if (isMounted) setUser(appUser);
         }
-        setLoading(false);
+        if (isMounted) setLoading(false);
+      } catch (error) {
+        console.error('Error setting up auth:', error);
+        if (isMounted) setLoading(false);
+      }
+    };
+
+    setupAuth();
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      async (event, session) => {
+        if (!isMounted) return;
+
+        if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'USER_UPDATED') {
+          if (session?.user) {
+            const appUser = await getProfile(session.user.id, session.user.email!);
+            if (isMounted) setUser(appUser);
+          }
+        } else if (event === 'SIGNED_OUT') {
+          if (isMounted) setUser(null);
+        }
       }
     );
 
-    // Initial check for session
-    const getInitialSession = async () => {
-        const { data: { session } } = await supabase.auth.getSession();
-        if (session?.user) {
-            const appUser = await getProfile(session.user.id, session.user.email!);
-            setUser(appUser);
-        }
-        setLoading(false);
-    }
-    getInitialSession();
-
-    // Cleanup the listener
     return () => {
-      authListener.subscription.unsubscribe();
+      isMounted = false;
+      subscription?.unsubscribe();
     };
   }, []);
 
