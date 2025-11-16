@@ -1,21 +1,19 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
-import { supabase } from '../lib/supabaseClient'; // Import your Supabase client instance
-import { User as SupabaseUser, Session } from '@supabase/supabase-js';
+import { supabase } from '../lib/supabaseClient';
+import { AuthChangeEvent, Session } from '@supabase/supabase-js';
 
-// Define the structure of a row in your 'profiles' table
 interface Profile {
-  id: string; // Must match the Supabase Auth User ID
+  id: string;
   name: string;
   tier: 'free' | 'premium' | 'professional' | 'elite';
-  loyalty_points: number; // Snake case for database column
+  loyalty_points: number;
   profile_image?: string;
   account_type: 'creator' | 'member';
   role: 'creator' | 'member';
   is_verified: boolean;
-  joined_date: string; // Stored as string/timestamp in DB
+  joined_date: string;
 }
 
-// Combine Supabase user data with the custom profile data
 interface AppUser extends Profile {
   email: string;
 }
@@ -30,8 +28,6 @@ interface AuthContextType {
   switchRole: () => Promise<void>;
 }
 
-// ... (TIER_POINTS constant remains the same)
-// Add the TIER_POINTS constant and export it
 export const TIER_POINTS = {
   free: 0,
   premium: 1000,
@@ -45,60 +41,79 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AppUser | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Helper function to fetch the full user profile data
   const getProfile = async (id: string, email: string): Promise<AppUser | null> => {
-    const { data: profile, error } = await supabase
-      .from('profiles')
-      .select('*')
-      .eq('id', id)
-      .single();
+    try {
+      const { data: profile, error } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', id)
+        .maybeSingle();
 
-    if (error) {
-      console.error('Error fetching profile:', error.message);
+      if (error) {
+        console.error('Error fetching profile:', error.message);
+        return null;
+      }
+
+      if (profile) {
+        return {
+          ...profile,
+          email: email,
+        };
+      }
+      return null;
+    } catch (err) {
+      console.error('Error in getProfile:', err);
       return null;
     }
-
-    if (profile) {
-      return {
-        ...profile,
-        email: email, // Add email which is not in the profiles table
-      };
-    }
-    return null;
   };
 
+  const handleAuthEvent = async (event: AuthChangeEvent, session: Session | null) => {
+    console.log('Auth event:', event);
+
+    if (event === 'SIGNED_IN' && session?.user) {
+      const appUser = await getProfile(session.user.id, session.user.email!);
+      setUser(appUser);
+    } else if (event === 'TOKEN_REFRESHED' && session?.user) {
+      const appUser = await getProfile(session.user.id, session.user.email!);
+      setUser(appUser);
+    } else if (event === 'USER_UPDATED' && session?.user) {
+      const appUser = await getProfile(session.user.id, session.user.email!);
+      setUser(appUser);
+    } else if (event === 'SIGNED_OUT') {
+      setUser(null);
+    }
+  };
 
   useEffect(() => {
     let isMounted = true;
 
-    const setupAuth = async () => {
+    const getInitialSession = async () => {
       try {
         const { data: { session } } = await supabase.auth.getSession();
-        if (isMounted && session?.user) {
-          const appUser = await getProfile(session.user.id, session.user.email!);
-          if (isMounted) setUser(appUser);
+
+        if (isMounted) {
+          if (session?.user) {
+            const appUser = await getProfile(session.user.id, session.user.email!);
+            if (isMounted) {
+              setUser(appUser);
+            }
+          }
+          setLoading(false);
         }
-        if (isMounted) setLoading(false);
       } catch (error) {
-        console.error('Error setting up auth:', error);
-        if (isMounted) setLoading(false);
+        console.error('Error getting initial session:', error);
+        if (isMounted) {
+          setLoading(false);
+        }
       }
     };
 
-    setupAuth();
+    getInitialSession();
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       async (event, session) => {
         if (!isMounted) return;
-
-        if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'USER_UPDATED') {
-          if (session?.user) {
-            const appUser = await getProfile(session.user.id, session.user.email!);
-            if (isMounted) setUser(appUser);
-          }
-        } else if (event === 'SIGNED_OUT') {
-          if (isMounted) setUser(null);
-        }
+        await handleAuthEvent(event, session);
       }
     );
 
@@ -144,13 +159,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const signOut = async () => {
-    await supabase.auth.signOut();
-    setUser(null);
+    try {
+      setLoading(true);
+      const { error } = await supabase.auth.signOut();
+
+      if (error) {
+        console.error('Error during sign out:', error.message);
+      }
+
+      setUser(null);
+      localStorage.removeItem('supabase.auth.token');
+    } catch (error) {
+      console.error('Error in signOut:', error);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const updateUser = async (userData: Partial<Profile>) => {
-    if (user) {
-      // Update the profiles table
+    if (!user) {
+      console.error('No user found for update');
+      return;
+    }
+
+    try {
       const { error } = await supabase
         .from('profiles')
         .update(userData)
@@ -158,19 +190,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       if (error) {
         console.error('Error updating user profile:', error.message);
-      } else {
-        // Re-fetch or locally update state after successful update
-        const updatedUser = await getProfile(user.id, user.email);
+        throw error;
+      }
+
+      const updatedUser = await getProfile(user.id, user.email);
+      if (updatedUser) {
         setUser(updatedUser);
       }
+    } catch (error) {
+      console.error('Error in updateUser:', error);
+      throw error;
     }
   };
 
   const switchRole = async () => {
-    if (user) {
-        const newRole = user.role === 'creator' ? 'member' : 'creator';
-        const newAccountType = user.account_type === 'creator' ? 'member' : 'creator';
-        await updateUser({ role: newRole, account_type: newAccountType });
+    if (!user) {
+      console.error('No user found for role switch');
+      return;
+    }
+
+    try {
+      const newRole = user.role === 'creator' ? 'member' : 'creator';
+      const newAccountType = user.account_type === 'creator' ? 'member' : 'creator';
+      await updateUser({ role: newRole, account_type: newAccountType });
+    } catch (error) {
+      console.error('Error switching role:', error);
+      throw error;
     }
   };
 

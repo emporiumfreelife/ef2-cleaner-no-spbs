@@ -116,7 +116,12 @@ export default function Media() {
         .eq('type', activeTab)
         .order('created_at', { ascending: false });
 
-      if (error) throw error;
+      if (error) {
+        if (error.message.includes('401') || error.message.includes('Unauthorized')) {
+          console.log('Session expired, user needs to re-authenticate');
+        }
+        throw error;
+      }
 
       if (!mediaData) {
         setMediaContent([]);
@@ -177,9 +182,6 @@ export default function Media() {
       setMediaContent(enrichedData);
     } catch (error: any) {
       console.error('Error fetching media:', error);
-      if (error?.message?.includes('401') || error?.message?.includes('Unauthorized')) {
-        setUser(null);
-      }
     } finally {
       setLoading(false);
     }
